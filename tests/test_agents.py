@@ -8,7 +8,7 @@ Test coverage:
 - Router node: offline heuristic routing (retrieval / chit_chat / off_topic)
 - Retriever node: produces evidence from the real index
 - Synthesiser node: offline draft from evidence
-- Verifier node: offline always-supported verdict
+- Verifier node: offline unverified status
 - Finaliser node: offline short-circuit for chit_chat / off_topic
 - Full graph: end-to-end smoke tests for key corpus questions
 - Follow-up question handling (history carry-over)
@@ -57,7 +57,7 @@ def _index_available() -> bool:
 
 
 @pytest.fixture(scope="module")
-def graph():
+def graph(retriever):
     """Compiled LangGraph graph (compiled once per test module)."""
     from kestrel.graph import build_graph
 
@@ -65,10 +65,12 @@ def graph():
 
 
 @pytest.fixture(scope="module")
-def retriever():
+def retriever(request):
     """Real Retriever backed by the persisted index."""
+    if not request.config.getoption("--integration"):
+        pytest.skip("Use --integration after building the local index")
     if not _index_available():
-        pytest.skip("Index missing or stale. Run: python -m kestrel.ingest")
+        pytest.fail("Index missing or stale. Run: python -m kestrel.ingest")
     from kestrel.retrieval import Retriever
 
     return Retriever()
@@ -306,8 +308,8 @@ def test_synthesiser_offline_no_evidence():
 # --------------------------------------------------------------------------
 
 
-def test_verifier_offline_marks_all_supported(retriever):
-    """Offline verifier must mark every claim 'supported'."""
+def test_verifier_offline_remains_unverified(retriever):
+    """Offline verification must never manufacture support."""
     from kestrel.agents import retriever_node, synthesiser_node, verifier_node
     from kestrel.state import make_initial_state
 
@@ -317,9 +319,10 @@ def test_verifier_offline_marks_all_supported(retriever):
     state.update(retriever_node(state, retriever=retriever))
     state.update(synthesiser_node(state))
     result = verifier_node(state)
-    assert result["verification_verdict"] == "supported"
+    assert result["verification_verdict"] == "insufficient_evidence"
+    assert result["verification_status"] == "skipped"
     for vc in result["verified_claims"]:
-        assert vc["verdict"] == "supported"
+        assert vc["verdict"] == "insufficient_evidence"
 
 
 def test_verifier_offline_no_claims():
@@ -333,7 +336,8 @@ def test_verifier_offline_no_claims():
     state["evidence"] = []
     state["draft_answer"] = ""
     result = verifier_node(state)
-    assert result["verification_verdict"] == "supported"
+    assert result["verification_verdict"] == "insufficient_evidence"
+    assert result["verification_status"] == "skipped"
     assert result["verified_claims"] == []
 
 

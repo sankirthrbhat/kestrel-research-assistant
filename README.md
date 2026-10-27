@@ -1,208 +1,141 @@
 # Kestrel Research Assistant
 
-A multi-agent research assistant that answers questions using the internal knowledge base of Kestrel Labs, a product-analytics SaaS.
+A research prototype over the supplied Kestrel Labs assignment corpus: 154 document chunks about a fictional product's plans, APIs, runbooks, and policies. It combines dense embeddings and BM25 with Reciprocal Rank Fusion (RRF), then uses a LangGraph workflow to draft and assess claims.
 
-The system combines hybrid retrieval, multi-agent orchestration, answer synthesis, citation verification, and LangSmith observability to produce grounded and auditable responses.
+**Verification is a model assessment, not a correctness guarantee.** Offline mode shows source excerpts without claiming they answer the question. A valid citation identifier proves that a source exists, not that it supports a claim.
 
-## Features
+## Workflow
 
-- Multi-agent research workflow built with LangGraph.
-- Hybrid retrieval using dense embeddings and BM25.
-- Evidence-based answer synthesis.
-- Citation verification and support checking.
-- Verifier retry mechanism for insufficient or unsupported evidence.
-- LangSmith tracing for agent execution and retrieval calls.
-- Command-line interface for interactive questions.
-- Streamlit interface for conversational interaction.
-- Evaluation pipeline with retrieval and answer-quality metrics.
-- Support for unsupported questions and insufficient evidence.
-- Local corpus indexing using Sentence Transformers and BM25.
+```mermaid
+flowchart LR
+  Q[Question and history] --> R[Router]
+  R -->|retrieval| S[Hybrid retrieval]
+  S --> D[Draft and claims]
+  D --> V[Validate model assessment]
+  V -->|new query, at most once| S
+  V --> F[Deterministic finalizer]
+  R -->|greeting or off topic| F
+```
 
-## Requirements
 
-- Python 3.11 or newer
-- Python virtual environment
-- Groq API key
-- LangSmith API key for tracing and evaluation
+- Dense search finds semantic matches; BM25 finds lexical matches. RRF combines their rank positions.
+- The verifier must assess each draft claim exactly once, with allowed verdicts and real source IDs.
+- A weaker claim verdict cannot be upgraded by an optimistic overall verdict.
+- Only a nonempty, new refinement can trigger a retry. The counter advances when retrieval starts.
+- The finalizer formats assessed claims directly; it makes no additional model call. Conflicting/insufficient evidence produces a cautious response with source excerpts.
+- Verification status is separate from verdict: not requested, skipped, failed, or performed.
+- Recovered provider errors remain visible to evaluation and the interface.
 
-## Setup
+## Setup (tested on Python 3.12)
 
-### 1. Clone the repository
+Clone the repository, then run commands from its root:
 
-```bash
-git clone https://github.com/sankirthrbhat99-rgb/kestrel-research-assistant.git
+```text
+git clone https://github.com/sankirthrbhat/kestrel-research-assistant.git
 cd kestrel-research-assistant
-2. Create a virtual environment
 python -m venv .venv
+```
 
-Windows PowerShell:
+Activate the environment:
 
-.\.venv\Scripts\Activate.ps1
+- PowerShell: `.\.venv\Scripts\Activate.ps1`
+- macOS/Linux: `source .venv/bin/activate`
 
-macOS/Linux:
+Install and build the local index:
 
-source .venv/bin/activate
-3. Install dependencies
-pip install -r requirements.txt
-4. Configure environment variables
+```text
+python -m pip install -r requirements.txt
+python -m kestrel.ingest
+```
 
-Copy the example environment file:
+The first ingestion downloads the public BAAI/bge-small-en-v1.5 embedding model. An LLM key is not needed. Subsequent local retrieval reuses the downloaded model and persistent Chroma/BM25 indexes.
 
-Windows PowerShell:
+The corpus is read-only to the application. Its committed SHA-256 is
+`b401a4f906446f4e93f1d58c714918acf40d94d81a80c6358e5b7edd46cbbb41`.
+A Git attributes rule preserves LF line endings on Windows, so a fresh checkout retains this digest.
 
-Copy-Item .env.example .env
+## Run
 
-macOS/Linux:
+```text
+python -m streamlit run app.py
+```
 
-cp .env.example .env
+Or use `python -m kestrel.cli` for the terminal interface.
+`run.ps1` / `run.sh` build/reuse the index and launch the CLI.
 
-Open .env and configure the required API keys and settings.
+Try “How many Beacons can a project have on each plan?” Inspect the source excerpts and the verification status. The UI retains status and sources in conversation history.
 
-Environment Variables
-Variable	Description	Default
-LLM_PROVIDER	LLM provider (groq or gemini)	groq
-LLM_MODEL	Model used for generation	openai/gpt-oss-120b
-GROQ_API_KEY	Groq API key	Required for Groq
-LANGSMITH_TRACING	Enables LangSmith tracing	true
-LANGSMITH_API_KEY	LangSmith API key	Required for tracing
-LANGSMITH_PROJECT	LangSmith project name	kestrel-research-assistant
-KESTREL_STRATEGY	Retrieval strategy (dense, bm25, or hybrid)	hybrid
+### Offline mode
 
-Never commit your .env file or expose API keys in the repository.
+No key means offline source browsing. To force it even if keys exist:
 
-Models Used
-Generation
-Provider: Groq
-Model: openai/gpt-oss-120b
-Embeddings
-Model: BAAI/bge-small-en-v1.5
-Execution: Local Sentence Transformers model
-Architecture
+- PowerShell: `$env:KESTREL_OFFLINE = '1'`
+- macOS/Linux: `export KESTREL_OFFLINE=1`
 
-The research assistant follows a multi-stage workflow:
+Offline routing uses simple keywords and does not reliably resolve pronouns. Retrieved passages can be irrelevant. They are labeled unverified; offline output is not an answer-quality benchmark.
 
-Router
-Determines the appropriate processing path for the user's question.
-Retriever
-Searches the internal knowledge base using the configured retrieval strategy.
-Synthesizer
-Produces a draft answer using the retrieved evidence.
-Verifier
-Checks whether the claims in the draft are supported by the retrieved source material and citations.
-Retry and Refinement
-If the evidence is insufficient, the system can refine the query and perform one additional retrieval attempt.
-Finalizer
-Removes or rephrases unsupported claims and prepares the final response.
+### Optional model configuration
 
-LangSmith tracing provides visibility into the execution of the workflow and its individual components.
+Copy .env.example to .env and set an OpenAI-compatible endpoint, API key, and model you can access. No secrets are required for tests or the deterministic demo.
 
-Running the Application
-One-command execution
+| Variable | Purpose |
+| --- | --- |
+| KESTREL_OFFLINE | Set to 1 to disable model calls |
+| KESTREL_LLM_API_KEY | Explicit provider key |
+| KESTREL_LLM_BASE_URL | OpenAI-compatible base URL ending in /v1 where appropriate |
+| KESTREL_LLM_MODEL | Model identifier available through that provider |
+| KESTREL_LLM_TIMEOUT | Per-request timeout in seconds |
+| KESTREL_STRATEGY | dense, bm25, or hybrid; default hybrid |
+| LANGCHAIN_TRACING_V2 | Optional tracing; disabled by default |
+| LANGCHAIN_API_KEY / LANGSMITH_API_KEY | Optional tracing key |
 
-macOS/Linux:
+Existing GROQ_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY and DEEPSEEK_API_KEY aliases remain supported, in that priority order after the explicit key. Override the model when provider availability changes. Model API calls can incur provider charges. No application feature requires LangSmith.
 
-./run.sh
+## Tests and deterministic demonstration
 
-Windows PowerShell:
+For lightweight workflow tests without embeddings:
+```text
+python -m pip install -r requirements-core.txt
+python -m pytest -q
+python -m kestrel.demo
+```
 
-.\run.ps1
+The demo uses explicitly mocked model responses and retrieval to show three control-flow cases: supported, insufficient evidence, and one useful retry. It is not a quality benchmark or a live-provider demonstration.
 
-The execution script is intended to prepare the local indexes and run the evaluation workflow.
+For real retrieval integration tests, install the full requirements, build the index, and run:
+```text
+python -m pytest -q --integration
+```
 
-Command-line interface
-python -m kestrel.chat
-Streamlit interface
-streamlit run app.py
-Evaluation
+Tests isolate credentials and block unmocked model API calls. The default suite skips real-index tests; missing/stale indexes cause an explicit failure when --integration is requested. CI runs the lightweight suite on Windows and Linux.
 
-The evaluation pipeline supports:
+## Reproducible evaluation
 
-Retrieval Recall@K
-Mean Reciprocal Rank (MRR)
-Citation Precision
-Faithfulness
-Answer Relevance
-Correctness
-Latency tracking
-LangSmith run URLs
-Verifier verdict tracking
+Reports are local JSON files. Use a new output directory for every run; old reports are never overwritten.
 
-Evaluation outputs are stored in the results/ directory.
+Compare retrieval with identical corpus, questions, k, and model:
+```text
+python -m eval.run_eval --mode retrieval --strategy dense --k 5 --tag dense --out-dir results/runs/dense
+python -m eval.run_eval --mode retrieval --strategy hybrid --k 5 --tag hybrid --out-dir results/runs/hybrid
+```
 
-The repository also contains retrieval comparison results documenting changes between the baseline and improved retrieval configurations.
+These are retrieval metrics, not answer accuracy. Questions without relevance labels are excluded from Recall/MRR means; scored sample sizes are reported. Raw follow-ups are not rewritten in retrieval-only mode.
 
-LangSmith Observability
+For a complete workflow run:
+```text
+python -m eval.run_eval --tag workflow --out-dir results/runs/workflow
+```
 
-LangSmith tracing is integrated into the application.
+Add --judge only when you want extra model calls to score correctness, relevance and faithfulness. Without it, answer quality is unscored. Judge failures are recorded separately; a verifier verdict is never treated as ground-truth faithfulness. Token totals are currently unknown (null), not zero.
 
-To enable tracing, configure the relevant LangSmith environment variables in .env:
+Reports record commit, source hashes, corpus/dataset hashes, Python/dependency versions, retrieval settings, provider/model, failures and scored sample sizes. Conversations are grouped and sorted by turn; a failed prerequisite turn causes dependent turns to be skipped. Means exclude failed/skipped cases, so always read failure counts alongside them.
 
-LANGSMITH_TRACING=true
-LANGSMITH_API_KEY=your_langsmith_api_key
-LANGSMITH_PROJECT=kestrel-research-assistant
+The 20-question dataset is a small development set with manually authored references, not an independent held-out benchmark. Historical reports under results/ describe earlier code and are not evidence of current answer quality. See [repair validation](docs/repair-validation.md) for the actual checks performed on this revision.
 
-Traces can be viewed in the LangSmith dashboard under the project:
+## Limitations and provenance
 
-kestrel-research-assistant
+This began as a research-assistant assignment; Kestrel Labs is the supplied example domain. No production deployment or real customer impact is claimed.
 
-The workflow provides visibility into retrieval and agent execution, including:
+Model assessments can miss unsupported facts and prompt injection. Strict schemas and source-ID validation reduce failure modes but do not solve semantic verification. The conservative finalizer sometimes refuses a useful answer, especially with conflicting sources. There is no verified production accuracy, human-rated evaluation, or measured performance gain claimed here.
 
-Router
-Retriever
-Synthesizer
-Verifier
-Finalizer
-Repository Structure
-.
-├── kestrel/
-│   ├── agents/
-│   ├── config.py
-│   ├── graph.py
-│   ├── llm.py
-│   ├── retrieval.py
-│   └── state.py
-│
-├── eval/
-│   └── run_eval.py
-│
-├── results/
-│   ├── eval_questions.jsonl
-│   ├── eval_results.jsonl
-│   ├── metrics_summary.json
-│   └── retrieval_comparison.md
-│
-├── docs/
-│   ├── design documentation
-│   └── reflection documentation
-│
-├── tests/
-├── app.py
-├── corpus.jsonl
-├── requirements.txt
-├── run.sh
-├── run.ps1
-├── .env.example
-└── README.md
-Corpus Integrity
-
-The corpus.jsonl file is treated as the read-only source of truth for the knowledge base.
-
-The corpus SHA-256 hash is:
-
-b401a4f906446f4e93f1d58c714918acf40d94d81a80c6358e5b7edd46cbbb41
-Security
-API keys must be stored in .env.
-.env must not be committed to Git.
-Generated indexes and virtual environments should remain excluded from version control.
-Do not expose credentials in logs, screenshots, or evaluation artifacts.
-License
-
-This project was developed as part of the Kestrel Research Assistant assignment.
-
-
-### Before replacing your README
-
-Run this in Antigravity's terminal to verify the configuration names:
-
-```powershell
-Get-Content .\kestrel\config.py
+See [step-by-step explanation](docs/repair-guide.md) for the defects, fixes, and interview walkthrough.

@@ -1,0 +1,7 @@
+# Lightweight workflow, UI, and deterministic tests (validated with Python 3.12).
+pytest==9.1.1
+langgraph==0.6.11
+langchain-core==0.3.86
+langsmith==0.14.12
+python-dotenv==1.2.4
+streamlit==1.66.1

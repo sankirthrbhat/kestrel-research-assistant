@@ -1,0 +1,5 @@
+# The corpus digest is defined over committed LF bytes, including on Windows.
+corpus.jsonl text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.md text eol=lf

@@ -113,7 +113,7 @@ changed.
 
 Reply with a single JSON object:
 {"claims": [{"claim": "...", "verdict": "supported", "chunk_ids": ["..."], "reason": "..."}], "verdict": "supported", "notes": "...", "refined_query": "..."}
-The top-level "verdict" is the most severe verdict across all claims. If evidence is insufficient, provide a "refined_query" string to search for better evidence, otherwise leave it empty."""
+Copy every input claim text exactly, once, without adding or dropping claims.\nThe top-level "verdict" is the most severe verdict across all claims. If evidence is insufficient, provide a "refined_query" string to search for better evidence, otherwise leave it empty."""
 
 VERIFIER_USER = """Question: {{question}}
 
@@ -129,44 +129,7 @@ Evidence:
 Return the verification JSON object."""
 
 
-# --------------------------------------------------------------------------
-# Finalizer
-# --------------------------------------------------------------------------
-
-FINALIZER_SYSTEM = """You are the Finalizer for a research assistant. You turn \
-a verified draft into the final answer shown to the user.
-
-Rules:
-- Preserve every citation from the draft. Keep chunk ids in square brackets.
-- If the verdict is "supported", answer directly and confidently.
-- If "partially_supported", answer but state clearly which part is not \
-established.
-- If "conflicting_evidence", present the conflict, state which source is newer \
-using its published date and version, and say what the current behaviour is \
-believed to be.
-- If "insufficient_evidence", say plainly that the knowledge base does not \
-contain the answer. Do not fill the gap with plausible invention. Briefly \
-suggest what would be needed.
-- Never add facts that are not in the evidence.
-- Keep it short, readable prose. No preamble, no restating the question.
-
-Reply with a single JSON object:
-{"final_answer": "...", "citations": [{"chunk_id": "...", "title": "..."}]}"""
-
-FINALIZER_USER = """Question: {{question}}
-
-Verifier verdict: {{verdict}}
-
-Verifier notes: {{notes}}
-
-Draft answer:
-{{draft}}
-
-Evidence metadata (chunk_id, title, version, published):
-{{metadata}}
-
-Return the final JSON object."""
-
+# Finalization is deterministic; no model prompt is used after verification.
 
 # --------------------------------------------------------------------------
 # Deterministic offline fallbacks (no API key configured)
@@ -201,8 +164,6 @@ __all__ = [
     "SYNTHESIS_USER",
     "VERIFIER_SYSTEM",
     "VERIFIER_USER",
-    "FINALIZER_SYSTEM",
-    "FINALIZER_USER",
     "OFFLINE_NO_EVIDENCE",
     "OFFLINE_CHIT_CHAT",
     "OFFLINE_OFF_TOPIC",

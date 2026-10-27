@@ -83,7 +83,7 @@ class LLMNotConfigured(RuntimeError):
     """Raised when an LLM call is attempted without credentials."""
 
 
-class LLMQuotaExhausted(Exception):
+class LLMQuotaExhausted(RuntimeError):
     """Raised when the LLM provider rate limit (TPD/TPM) is exhausted."""
 
 
@@ -109,6 +109,9 @@ class LLMConfig:
           KESTREL_LLM_API_KEY > GROQ_API_KEY > GEMINI_API_KEY >
           OPENAI_API_KEY > DEEPSEEK_API_KEY
         """
+        if os.environ.get("KESTREL_OFFLINE", "").lower() in ("1", "true"):
+            return cls(api_key=None, base_url=DEFAULT_BASE_URL, model=DEFAULT_MODEL,
+                       timeout=DEFAULT_TIMEOUT, provider="offline")
         # ---- Explicit KESTREL override -----------------------------------------
         kestrel_key = os.environ.get("KESTREL_LLM_API_KEY")
         if kestrel_key:
@@ -248,6 +251,7 @@ class LLMClient:
                 "OPENAI_API_KEY, or DEEPSEEK_API_KEY."
             )
 
+        self.last_usage = None
         messages: list[dict[str, str]] = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -262,7 +266,6 @@ class LLMClient:
             payload["max_tokens"] = max_tokens
 
         url = f"{self.config.base_url}/chat/completions"
-        print(f"[DEBUG LLM] Calling {url} with model {self.config.model}", flush=True)
         data = json.dumps(payload).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
@@ -271,7 +274,7 @@ class LLMClient:
         }
 
         last_exc: Exception | None = None
-        for attempt in range(100):
+        for attempt in range(MAX_RETRIES + 1):
             request = urllib.request.Request(
                 url, data=data, headers=headers, method="POST"
             )
@@ -279,15 +282,17 @@ class LLMClient:
                 with urllib.request.urlopen(request, timeout=self.config.timeout) as response:
                     body = json.loads(response.read().decode("utf-8"))
                 # Success — capture usage and return.
-                self.last_usage = body.get("usage") or None
                 try:
-                    return body["choices"][0]["message"]["content"]
+                    content = body["choices"][0]["message"]["content"]
+                    if not isinstance(content, str) or not content.strip():
+                        raise TypeError("Expected nonempty text completion")
+                    self.last_usage = body.get("usage") or None
+                    return content
                 except (KeyError, IndexError, TypeError) as exc:
-                    raise RuntimeError(f"Unexpected LLM response shape: {body!r}") from exc
+                    raise RuntimeError("Unexpected LLM response shape") from exc
 
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")
-                print(f"[DEBUG LLM] HTTPError {exc.code}: {detail}", flush=True)
                 if exc.code in _RETRYABLE_CODES:
                     if attempt < MAX_RETRIES:
                         delay = RETRY_BASE_DELAY * (2 ** attempt)
@@ -295,7 +300,7 @@ class LLMClient:
                             import re
                             match = re.search(r'"retryDelay":\s*"([0-9.]+)s"', detail)
                             if match:
-                                delay = float(match.group(1)) + 0.5
+                                delay = min(60.0, max(0.0, float(match.group(1)))) + 0.5
                         except Exception:
                             pass
                         time.sleep(delay)
@@ -310,8 +315,8 @@ class LLMClient:
                     f"LLM request failed ({exc.code}): {detail}"
                 ) from exc
 
-            except urllib.error.URLError as exc:
-                raise RuntimeError(f"LLM request failed: {exc.reason}") from exc
+            except (TimeoutError, urllib.error.URLError) as exc:
+                raise RuntimeError("LLM network request failed") from exc
 
         # Should be unreachable, but satisfies type checkers.
         raise RuntimeError("LLM request failed after all retry attempts.") from last_exc

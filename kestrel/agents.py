@@ -12,9 +12,9 @@ instead.  This guarantees the full graph can run -- and the CLI/tests can
 exercise it -- with zero credentials.
 
 The offline router uses keyword matching; the offline synthesiser builds a
-plain-text answer from the top retrieved chunks; the offline verifier marks
-everything "supported" (it has nothing to compare against); the offline
-finaliser trims the draft to a clean paragraph.
+plain-text excerpts from the top retrieved chunks; offline verification is
+explicitly skipped. The deterministic finaliser renders assessed claims or
+clearly labeled unverified source excerpts.
 
 JSON parsing
 ------------
@@ -38,13 +38,11 @@ import re
 from typing import Any
 
 from . import config
-from .llm import LLMClient, LLMConfig, LLMNotConfigured
+from .llm import LLMClient, LLMNotConfigured
 from .prompts import (
     OFFLINE_CHIT_CHAT,
     OFFLINE_NO_EVIDENCE,
     OFFLINE_OFF_TOPIC,
-    FINALIZER_SYSTEM,
-    FINALIZER_USER,
     ROUTER_SYSTEM,
     ROUTER_USER,
     SYNTHESIS_SYSTEM,
@@ -98,8 +96,10 @@ def _format_evidence(evidence: list[EvidenceItem]) -> str:
         return "(no evidence retrieved)"
     parts: list[str] = []
     for item in evidence:
+        meta = item.get("metadata", {})
         parts.append(
-            f"[{item['chunk_id']}] (title: {item['title']}, score: {item['score']:.3f})\n"
+            f"[{item['chunk_id']}] (title: {item['title']}, score: {item['score']:.3f}, "
+            f"version: {meta.get('version', '')}, published: {meta.get('published', '')})\n"
             f"{item['text']}"
         )
     return "\n\n".join(parts)
@@ -132,17 +132,56 @@ def _safe_json(text: str) -> dict[str, Any] | None:
     text = re.sub(r"\s*```$", "", text, flags=re.MULTILINE)
     text = text.strip()
     try:
-        return json.loads(text)
+        value = json.loads(text)
+        return value if isinstance(value, dict) else None
     except json.JSONDecodeError:
         # Try to extract the first {...} object from the text (models sometimes
         # add a trailing explanation after the JSON).
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if m:
             try:
-                return json.loads(m.group(0))
+                value = json.loads(m.group(0))
+                return value if isinstance(value, dict) else None
             except json.JSONDecodeError:
                 pass
     return None
+
+
+def _text(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    return value.strip()
+
+
+def _strings(value: Any, field: str) -> list[str]:
+    if not isinstance(value, list) or any(not isinstance(x, str) or not x.strip() for x in value):
+        raise ValueError(f"{field} must be a list of nonempty strings")
+    return list(dict.fromkeys(x.strip() for x in value))
+
+
+def _claims(value: Any) -> list[Claim]:
+    if not isinstance(value, list):
+        raise ValueError("claims must be a list")
+    result = []
+    for c in value:
+        if not isinstance(c, dict):
+            raise ValueError("claim must be an object")
+        text = _text(c.get("claim"), "claim")
+        if not text:
+            raise ValueError("claim must not be empty")
+        result.append(Claim(claim=text, chunk_ids=_strings(c.get("chunk_ids"), "chunk_ids")))
+    if len({c["claim"] for c in result}) != len(result):
+        raise ValueError("duplicate claims")
+    return result
+
+
+def _failure(state: KestrelState, node: str, exc: Exception) -> dict[str, Any]:
+    # Record only the category: provider response bodies can contain private data.
+    return {"errors": [*state.get("errors", []), f"{node}: {type(exc).__name__}"]}
+
+
+def _normal_query(query: str) -> str:
+    return " ".join(re.findall(r"\w+", query.casefold()))
 
 
 def _search_results_to_evidence(results: list[SearchResult]) -> list[EvidenceItem]:
@@ -210,14 +249,19 @@ def router_node(state: KestrelState) -> dict[str, Any]:
         parsed = _safe_json(raw)
         if not parsed:
             raise ValueError(f"Unparseable router output: {raw!r}")
+        route = _text(parsed.get("route", "retrieval"), "route")
+        if route not in ("retrieval", "chit_chat", "off_topic"):
+            raise ValueError("invalid route")
+        standalone = _text(parsed.get("standalone_question", question), "standalone_question")
+        queries = _strings(parsed.get("sub_queries", [standalone]), "sub_queries")
         return {
-            "standalone_question": str(parsed.get("standalone_question", question)),
-            "route": str(parsed.get("route", "retrieval")),
-            "sub_queries": list(parsed.get("sub_queries", [question])),
-            "router_reasoning": str(parsed.get("reasoning", "")),
+            "standalone_question": standalone or question,
+            "route": route,
+            "sub_queries": queries or [standalone or question],
+            "router_reasoning": _text(parsed.get("reasoning", ""), "reasoning"),
         }
-    except (LLMNotConfigured, RuntimeError, ValueError):
-        return _offline_router(question, history)
+    except (LLMNotConfigured, RuntimeError, ValueError) as exc:
+        return {**_offline_router(question, history), **_failure(state, "router", exc)}
 
 
 # --------------------------------------------------------------------------
@@ -242,6 +286,10 @@ def retriever_node(
 ) -> dict[str, Any]:
     """Run search_corpus for every sub-query and merge evidence."""
     sub_queries = state.get("sub_queries") or [state["standalone_question"] or state["question"]]
+    pending = state.get("pending_query", "")
+    retrying = bool(pending and state.get("retries", 0) < 1)
+    if retrying:
+        sub_queries = [pending]
     _retriever = retriever or get_retriever()
 
     seen_ids: set[str] = set()
@@ -264,7 +312,13 @@ def retriever_node(
     # Re-sort by score descending after merge.
     merged.sort(key=lambda x: x["score"], reverse=True)
 
-    return {"evidence": merged}
+    return {
+        "evidence": merged,
+        "retries": state.get("retries", 0) + int(retrying),
+        "retrieval_attempts": state.get("retrieval_attempts", 0) + 1,
+        "retrieval_queries": [*state.get("retrieval_queries", []), *sub_queries],
+        "pending_query": "",
+    }
 
 
 # --------------------------------------------------------------------------
@@ -318,12 +372,12 @@ def synthesiser_node(state: KestrelState) -> dict[str, Any]:
         if not parsed:
             raise ValueError(f"Unparseable synthesiser output: {raw!r}")
         return {
-            "draft_answer": str(parsed.get("draft_answer", "")),
-            "claims": list(parsed.get("claims", [])),
-            "missing_evidence": str(parsed.get("missing_evidence", "")),
+            "draft_answer": _text(parsed.get("draft_answer", ""), "draft_answer"),
+            "claims": _claims(parsed.get("claims", [])),
+            "missing_evidence": _text(parsed.get("missing_evidence", ""), "missing_evidence"),
         }
-    except (LLMNotConfigured, RuntimeError, ValueError):
-        return _offline_synthesiser(question, evidence)
+    except (LLMNotConfigured, RuntimeError, ValueError) as exc:
+        return {**_offline_synthesiser(question, evidence), **_failure(state, "synthesiser", exc)}
 
 
 # --------------------------------------------------------------------------
@@ -331,161 +385,151 @@ def synthesiser_node(state: KestrelState) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
+_VERDICT_ORDER = {
+    "supported": 1,
+    "partially_supported": 2,
+    "conflicting_evidence": 3,
+    "insufficient_evidence": 4,
+}
+
+
 def _offline_verifier(
-    claims: list[Claim], evidence: list[EvidenceItem], draft: str
+    claims: list[Claim], evidence: list[EvidenceItem], draft: str,
+    *, status: str = "skipped", reason: str = "No model verification performed.",
 ) -> dict[str, Any]:
-    """Mark every claim 'supported' offline (we cannot cross-check without an LLM)."""
-    verified: list[VerifiedClaim] = [
-        VerifiedClaim(
-            claim=c["claim"],
-            verdict="supported",
-            chunk_ids=c["chunk_ids"],
-            reason="Offline: assumed supported (no LLM to verify).",
-        )
-        for c in claims
-    ]
+    """Evidence being retrieved is not proof that a draft claim is supported."""
     return {
-        "verified_claims": verified,
-        "verification_verdict": "supported",
-        "verification_notes": "Offline mode: no LLM verification performed.",
+        "verified_claims": [
+            VerifiedClaim(claim=c["claim"], verdict="insufficient_evidence",
+                          chunk_ids=[], reason=reason) for c in claims
+        ],
+        "verification_verdict": "insufficient_evidence",
+        "verification_status": status,
+        "verification_notes": reason,
+        "pending_query": "",
     }
 
 
 def verifier_node(state: KestrelState) -> dict[str, Any]:
-    """Cross-check every claim against the retrieved evidence."""
+    """Validate a complete claim assessment; never upgrade missing evidence."""
     question = state["standalone_question"] or state["question"]
-    draft = state["draft_answer"]
-    claims = state["claims"]
-    evidence = state["evidence"]
-
+    draft, claims, evidence = state["draft_answer"], state["claims"], state["evidence"]
     client, configured = _get_client()
+    if not configured or not claims or not evidence:
+        reason = ("No model configured; sources are unverified." if not configured
+                  else "No claims or evidence available for verification.")
+        return _offline_verifier(claims, evidence, draft, reason=reason)
 
-    if not configured or not claims:
-        return _offline_verifier(claims, evidence, draft)
-
-    prompt = render(
-        VERIFIER_USER,
-        question=question,
-        draft=draft,
-        claims=_format_claims(claims),
-        evidence=_format_evidence(evidence),
-    )
+    prompt = render(VERIFIER_USER, question=question, draft=draft,
+                    claims=_format_claims(claims), evidence=_format_evidence(evidence))
     try:
-        raw = client.complete(prompt, system=VERIFIER_SYSTEM, temperature=0.0)
-        parsed = _safe_json(raw)
+        parsed = _safe_json(client.complete(prompt, system=VERIFIER_SYSTEM, temperature=0.0))
         if not parsed:
-            raise ValueError(f"Unparseable verifier output: {raw!r}")
-
-        raw_claims = parsed.get("claims", [])
+            raise ValueError("Expected verifier JSON object")
+        raw_claims = parsed.get("claims")
+        checked = _claims(raw_claims)
+        # Exact text matching makes omissions, replacements and additions detectable.
+        expected = {c["claim"] for c in claims}
+        if {c["claim"] for c in checked} != expected:
+            raise ValueError("Verifier must assess each original claim exactly once")
+        known_ids = {e["chunk_id"] for e in evidence}
         verified: list[VerifiedClaim] = []
         for c in raw_claims:
-            verified.append(
-                VerifiedClaim(
-                    claim=str(c.get("claim", "")),
-                    verdict=str(c.get("verdict", "supported")),
-                    chunk_ids=list(c.get("chunk_ids", [])),
-                    reason=str(c.get("reason", "")),
-                )
-            )
-
-        # Severity ordering for the top-level verdict.
-        _ORDER = {
-            "insufficient_evidence": 4,
-            "conflicting_evidence": 3,
-            "partially_supported": 2,
-            "supported": 1,
+            verdict = c.get("verdict")
+            if verdict not in _VERDICT_ORDER:
+                raise ValueError("Invalid claim verdict")
+            ids = _strings(c["chunk_ids"], "chunk_ids")
+            reason = _text(c.get("reason", ""), "reason")
+            # A model cannot establish support by citing absent or invented sources.
+            if not ids or not set(ids) <= known_ids:
+                verdict = "insufficient_evidence"
+                reason = "Missing or unknown evidence identifiers."
+            verified.append(VerifiedClaim(
+                claim=c["claim"].strip(), verdict=verdict,
+                chunk_ids=[i for i in ids if i in known_ids], reason=reason,
+            ))
+        worst = max((c["verdict"] for c in verified), key=_VERDICT_ORDER.get)
+        top = parsed.get("verdict", worst)
+        if top not in _VERDICT_ORDER:
+            raise ValueError("Invalid overall verdict")
+        verdict = max((worst, top), key=_VERDICT_ORDER.get)
+        refined = _text(parsed.get("refined_query", ""), "refined_query")
+        previous = [question, *state.get("sub_queries", []), *state.get("retrieval_queries", [])]
+        useful = bool(_normal_query(refined)) and _normal_query(refined) not in {
+            _normal_query(q) for q in previous
         }
-        final_verdict = str(parsed.get("verdict", worst))
-        out: dict[str, Any] = {
+        needs_more = verdict in ("insufficient_evidence", "partially_supported")
+        return {
             "verified_claims": verified,
-            "verification_verdict": final_verdict,
-            "verification_notes": str(parsed.get("notes", "")),
+            "verification_verdict": verdict,
+            "verification_status": "performed",
+            "verification_notes": _text(parsed.get("notes", ""), "notes"),
+            "pending_query": refined if needs_more and useful and state.get("retries", 0) < 1 else "",
         }
-        
-        refined = str(parsed.get("refined_query", "")).strip()
-        if (final_verdict == "insufficient_evidence" or any(c["verdict"] in ("insufficient_evidence", "partially_supported") for c in verified)) and refined and state.get("retries", 0) < 1:
-            out["retries"] = state.get("retries", 0) + 1
-            out["sub_queries"] = state.get("sub_queries", []) + [refined]
-            
-        return out
-    except (LLMNotConfigured, RuntimeError, ValueError):
-        return _offline_verifier(claims, evidence, draft)
+    except (LLMNotConfigured, RuntimeError, ValueError, TypeError) as exc:
+        return {
+            **_offline_verifier(claims, evidence, draft, status="failed",
+                                reason="Verification failed; sources remain unverified."),
+            **_failure(state, "verifier", exc),
+        }
 
 
 # --------------------------------------------------------------------------
-# Node: Finaliser
+# Finaliser: deterministic formatting prevents new post-verification claims.
 # --------------------------------------------------------------------------
 
 
-def _offline_finaliser(
-    route: str,
-    draft: str,
-    evidence: list[EvidenceItem],
-    verdict: str,
-) -> dict[str, Any]:
-    """Produce the final answer offline."""
+def _source_excerpts(evidence: list[EvidenceItem]) -> dict[str, Any]:
+    top = evidence[:4]
+    return {
+        "final_answer": "Unverified source excerpts — these may not answer your question.\n\n"
+                        + "\n\n".join(f"[{e['chunk_id']}] {e['text'][:300].strip()}" for e in top),
+        "citations": [Citation(chunk_id=e["chunk_id"], title=e["title"]) for e in top],
+    }
+
+
+def _offline_finaliser(route: str, draft: str, evidence: list[EvidenceItem],
+                       verdict: str) -> dict[str, Any]:
     if route == "chit_chat":
         return {"final_answer": OFFLINE_CHIT_CHAT, "citations": []}
     if route == "off_topic":
         return {"final_answer": OFFLINE_OFF_TOPIC, "citations": []}
-    if not draft or not evidence:
+    if not evidence:
         return {"final_answer": OFFLINE_NO_EVIDENCE, "citations": []}
-
-    # Trim the draft to a readable length.
-    answer = draft[:2000].strip()
-    citations: list[Citation] = [
-        Citation(chunk_id=item["chunk_id"], title=item["title"])
-        for item in evidence[:6]
-    ]
-    return {"final_answer": answer, "citations": citations}
+    return _source_excerpts(evidence)
 
 
 def finaliser_node(state: KestrelState) -> dict[str, Any]:
-    """Produce the polished, user-facing answer."""
-    route = state["route"]
-    question = state["standalone_question"] or state["question"]
-    draft = state["draft_answer"]
-    verdict = state["verification_verdict"] or "supported"
-    notes = state["verification_notes"]
-    evidence = state["evidence"]
+    """Render only assessed claims; never polish the unchecked draft with an LLM."""
+    route, evidence = state["route"], state["evidence"]
+    verdict = state.get("verification_verdict") or "insufficient_evidence"
+    if route in ("chit_chat", "off_topic") or not evidence:
+        return _offline_finaliser(route, "", evidence, verdict)
+    if state.get("verification_status") != "performed":
+        return _source_excerpts(evidence)
 
-    # Short-circuits that need no LLM.
-    if route in ("chit_chat", "off_topic"):
-        return _offline_finaliser(route, draft, evidence, verdict)
-
-    if not evidence:
-        return {"final_answer": OFFLINE_NO_EVIDENCE, "citations": []}
-
-    client, configured = _get_client()
-
-    if not configured:
-        return _offline_finaliser(route, draft, evidence, verdict)
-
-    metadata_text = _format_metadata(evidence)
-    prompt = render(
-        FINALIZER_USER,
-        question=question,
-        verdict=verdict,
-        notes=notes,
-        draft=draft,
-        metadata=metadata_text,
-    )
-    try:
-        raw = client.complete(prompt, system=FINALIZER_SYSTEM, temperature=0.0)
-        parsed = _safe_json(raw)
-        if not parsed:
-            raise ValueError(f"Unparseable finaliser output: {raw!r}")
-        raw_citations = parsed.get("citations", [])
-        citations: list[Citation] = [
-            Citation(chunk_id=str(c.get("chunk_id", "")), title=str(c.get("title", "")))
-            for c in raw_citations
-        ]
-        return {
-            "final_answer": str(parsed.get("final_answer", draft)),
-            "citations": citations,
-        }
-    except (LLMNotConfigured, RuntimeError, ValueError):
-        return _offline_finaliser(route, draft, evidence, verdict)
+    known = {e["chunk_id"]: e for e in evidence}
+    supported, cited = [], []
+    for claim in state.get("verified_claims", []):
+        ids = claim["chunk_ids"]
+        if (claim["verdict"] == "supported" and ids and set(ids) <= known.keys()
+                and all(i in known for i in re.findall(r"\[([^\[\]]+)\]", claim["claim"]))):
+            supported.append(claim["claim"] + " " + " ".join(f"[{i}]" for i in ids))
+            cited.extend(ids)
+    # Conflicts and an overall insufficient verdict must not become a confident
+    # answer merely because one individual claim was marked supported.
+    if verdict in ("insufficient_evidence", "conflicting_evidence") or not supported:
+        message = ("The retrieved sources conflict; I cannot give a settled answer."
+                   if verdict == "conflicting_evidence" else OFFLINE_NO_EVIDENCE)
+        excerpts = _source_excerpts(evidence)
+        return {"final_answer": message + "\n\n" + excerpts["final_answer"],
+                "citations": excerpts["citations"]}
+    prefix = ("Only part of the question is supported; other claims remain unverified.\n\n"
+              if verdict == "partially_supported" else "")
+    return {
+        "final_answer": prefix + "\n\n".join(supported),
+        "citations": [Citation(chunk_id=i, title=known[i]["title"]) for i in dict.fromkeys(cited)],
+    }
 
 
 # --------------------------------------------------------------------------
@@ -503,16 +547,10 @@ def route_after_router(state: KestrelState) -> str:
 
 def route_after_verifier(state: KestrelState) -> str:
     """Return the edge label for the conditional branch after verifier_node."""
-    verdict = state.get("verification_verdict", "supported")
-    retries = state.get("retries", 0)
-    
-    if retries < 1:
-        if verdict == "insufficient_evidence":
-            return "retriever"
-        for c in state.get("verified_claims", []):
-            if c["verdict"] in ("insufficient_evidence", "partially_supported"):
-                return "retriever"
-                
+    if (state.get("verification_status") == "performed"
+            and state.get("pending_query")
+            and state.get("retries", 0) < 1):
+        return "retriever"
     return "finaliser"
 
 

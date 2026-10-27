@@ -72,7 +72,7 @@ class KestrelState(TypedDict):
     """The mutable bag of state flowing through every node.
 
     Fields are deliberately coarse-grained: each node reads what it needs
-    and writes what it produces.  No field is shared between two writers.
+    and writes what it produces.  Retry and error fields have explicit ownership/merge rules.
     """
 
     # --- Input ----------------------------------------------------------------
@@ -130,6 +130,17 @@ class KestrelState(TypedDict):
     retries: int
     """Number of times the verifier has routed back to the retriever."""
 
+    pending_query: str
+    """Validated refined query awaiting one additional retrieval."""
+    retrieval_queries: list[str]
+    """Queries already executed, used to reject repeated refinements."""
+    retrieval_attempts: int
+    """Includes the initial retrieval; maximum two in the compiled workflow."""
+    verification_status: str
+    """not_requested | skipped | failed | performed; separate from verdict."""
+    errors: list[str]
+    """Sanitized stage error categories, including recovered provider failures."""
+
     # --- Error channel -------------------------------------------------------
     error: str
     """Non-empty when an unrecoverable error occurred; nodes should check this."""
@@ -139,7 +150,7 @@ def make_initial_state(question: str, history: list[dict[str, str]] | None = Non
     """Return a fully-initialised KestrelState for the start of a turn."""
     return KestrelState(
         question=question,
-        history=history or [],
+        history=[dict(turn) for turn in (history or [])],
         standalone_question="",
         route="",
         sub_queries=[],
@@ -155,6 +166,12 @@ def make_initial_state(question: str, history: list[dict[str, str]] | None = Non
         citations=[],
         retries=0,
         error="",
+        pending_query="",
+        retrieval_queries=[],
+        retrieval_attempts=0,
+        verification_status="not_requested",
+        errors=[],
+
     )
 
 
