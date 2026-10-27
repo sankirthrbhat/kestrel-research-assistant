@@ -34,8 +34,8 @@ call.
 Unsupported evidence handling
 ------------------------------
 When the verifier finds ``insufficient_evidence`` the finaliser will say so
-plainly rather than guessing.  No special graph wiring is needed; the
-finaliser reads the verdict from state.
+plainly rather than guessing.  A validated new query can request one extra retrieval. The finaliser
+renders assessed claims directly, or labeled excerpts when verification is unavailable.
 
 LangSmith tracing
 -----------------
@@ -147,6 +147,7 @@ def _invoke(
         extra_metadata={"provider": cfg.provider},
     )
 
+    run_cfg["recursion_limit"] = 12
     result: KestrelState = _graph.invoke(initial, config=run_cfg)  # type: ignore[attr-defined]
     return result, run_cfg["run_id"]
 
@@ -227,6 +228,7 @@ def stream_question(
         extra_metadata={"provider": cfg.provider},
     )
 
+    run_cfg["recursion_limit"] = 12
     for output in _graph.stream(initial, config=run_cfg): # type: ignore
         for node_name, state_update in output.items():
             yield node_name, "completed", state_update

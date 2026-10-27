@@ -269,5 +269,5 @@ def test_run_query_traced_trace_url_none_without_config():
     from kestrel.graph import build_graph, run_query_traced
 
     graph = build_graph()
-    _, trace_url = run_query_traced("What is KQL?", graph=graph)
+    _, trace_url = run_query_traced("Hello", graph=graph)
     assert trace_url is None

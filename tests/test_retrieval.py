@@ -165,9 +165,9 @@ def test_redshift_not_available_on_starter(retriever):
 # --------------------------------------------------------------------------
 
 
-def test_default_strategy_is_dense():
-    """Phase 1 baseline must be dense retrieval."""
-    assert config.DEFAULT_STRATEGY == "dense"
+def test_default_strategy_is_hybrid():
+    """The documented application default is hybrid retrieval."""
+    assert config.DEFAULT_STRATEGY == "hybrid"
     assert config.NEIGHBOR_EXPANSION_DEFAULT is False
 
 

@@ -47,7 +47,7 @@ def _format_answer(state: dict) -> str:
     if route:
         lines.append(f"[route: {route}]")
     if verdict and route not in ("chit_chat", "off_topic"):
-        lines.append(f"[verification: {verdict}]")
+        lines.append(f"[verification: {state.get('verification_status', 'not_requested')} / {verdict}]")
 
     lines.append("")
     lines.append(answer)

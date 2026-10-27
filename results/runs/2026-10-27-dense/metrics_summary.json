@@ -1,0 +1,69 @@
+{
+  "cases": 20,
+  "status_counts": {
+    "completed": 20
+  },
+  "failure_rate": 0.0,
+  "quality_status_counts": {
+    "skipped": 20
+  },
+  "metrics": {
+    "retrieval_recall@k": {
+      "mean": 0.6186274509803922,
+      "scored_cases": 17
+    },
+    "retrieval_mrr@k": {
+      "mean": 0.6882352941176471,
+      "scored_cases": 17
+    }
+  },
+  "total_token_usage": null,
+  "notes": [
+    "Quality means exclude failed/skipped cases; inspect failure counts alongside them.",
+    "Model judging is optional and fallible, not a validated accuracy benchmark.",
+    "Source-ID overlap measures retrieval relevance, not semantic claim support.",
+    "Token usage is unavailable; null is not zero."
+  ],
+  "provenance": {
+    "recorded_at_utc": "2026-10-27T05:59:28.764486+00:00",
+    "commit": "ec30538b3cbb0231dc6520e7730db912c030b56a",
+    "working_tree_dirty": true,
+    "source_sha256": {
+      "kestrel/__init__.py": "94f4f42bb3ff1a3aff12abdfc06c6bf5c9fe08df8c28b0991e964f5fd2d16b18",
+      "kestrel/agents.py": "10e5474976a0a0a564f77e9dcf47be4aa69c130ca94961ccb737ffbb6e34e5aa",
+      "kestrel/chat.py": "583a96fca7ce725d13d99d1a5eb26f50aa9a1334038357eec562fffedbc9d511",
+      "kestrel/cli.py": "fb403da5e28110379d2cb90aee01945706019043f1a17fe6616459df692c1c2e",
+      "kestrel/config.py": "4c7ace69f381ee3d52c5a24a3a8a43ed899bf3f27b2e2091863d5b18171b8dda",
+      "kestrel/demo.py": "f25543b283874222f2be2b72c77022b89e36797d26af1922f135a8d3970cfaaf",
+      "kestrel/graph.py": "5aa5e20dc9b7b7bfaae72a021d7a55f99f2e9782d0098866178cfef17dc6f692",
+      "kestrel/ingest.py": "7a3b86548158ef4a3fb5b26ac17644d0c6663747aa8720c327ad9d482ad47353",
+      "kestrel/llm.py": "4def588040cc2d03da5b6519d51af084d295253d929ffa7d005df454a39db44b",
+      "kestrel/prompts.py": "2136e14e49df81a9d1dbb23df21099f9cc4ddede26b32e628a75f250aa48ec33",
+      "kestrel/retrieval.py": "2b00d818d9fc169a7c71bd1c3a8aee4bb9b874e75fa186358832e7b2ff379cd7",
+      "kestrel/state.py": "382dce527d8793bb5b2431945ce8815c610a8eb2fd97e60db591540148cd2583",
+      "kestrel/tracing.py": "b1107768eb74eca0cd6dbdb04deb8be367e7b689f051eac3123eb3b1d7c327f1",
+      "eval/run_eval.py": "7bd065aa071e0a12f4df2a46246aa170e506c60ce15313ce733d94b6e4386675"
+    },
+    "corpus_sha256": "b401a4f906446f4e93f1d58c714918acf40d94d81a80c6358e5b7edd46cbbb41",
+    "dataset_sha256": "53b822b69f617c02045f877781eb34b2acd29e320bbfe6577c8d96af94fc96c5",
+    "python": "3.12.14",
+    "dependencies": {
+      "langgraph": "0.6.11",
+      "langchain-core": "0.3.86",
+      "sentence-transformers": "6.2.0",
+      "chromadb": "1.5.9",
+      "rank-bm25": "0.2.2"
+    },
+    "mode": "retrieval",
+    "strategy": "dense",
+    "k": 5,
+    "embedding_model": "BAAI/bge-small-en-v1.5",
+    "query_instruction": "Represent this sentence for searching relevant passages: ",
+    "candidate_pool": 20,
+    "rrf_k": 60,
+    "provider": "offline",
+    "generation_model": null,
+    "model_judging": false,
+    "tag": "repaired-dense"
+  }
+}

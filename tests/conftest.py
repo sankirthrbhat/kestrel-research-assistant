@@ -30,8 +30,30 @@ def corpus_chunks():
 
 
 @pytest.fixture(scope="session")
-def retriever():
+def retriever(request):
     """A Retriever over the persisted index; skips if the index is stale."""
+    if not request.config.getoption("--integration"):
+        pytest.skip("Use --integration after building the local index")
     if not _index_available():
-        pytest.skip("Index missing or stale. Run: python -m kestrel.ingest")
+        pytest.fail("Index missing or stale. Run: python -m kestrel.ingest")
     return retrieval.Retriever()
+
+def pytest_addoption(parser):
+    parser.addoption("--integration", action="store_true",
+                     help="Run real-model/index tests after local ingestion")
+
+
+@pytest.fixture(autouse=True)
+def isolated_credentials(monkeypatch):
+    """Tests never load a developer's .env or make unmocked provider calls."""
+    from kestrel import llm
+    import urllib.request
+    for key in ("KESTREL_LLM_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY",
+                "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "KESTREL_OFFLINE",
+                "LANGCHAIN_API_KEY", "LANGSMITH_API_KEY",
+                "LANGCHAIN_TRACING_V2", "LANGSMITH_TRACING"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(llm, "_load_dotenv_if_available", lambda: None)
+    def no_network(*args, **kwargs):
+        raise AssertionError("Unexpected provider HTTP call in test")
+    monkeypatch.setattr(urllib.request, "urlopen", no_network)
